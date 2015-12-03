@@ -1,0 +1,139 @@
+#!/bin/bash
+
+## Email Variables
+EMAILDATE=`date --date="today" +%y-%m-%d`
+EMAIL="<%= @email %>"
+
+SUBJECT="[servername] Backup Script Started! - "$EMAILDATE
+EMAILMESSAGE="/tmp/emailmessage1.txt"
+echo "Just to let you know that the backup script has started."> $EMAILMESSAGE
+/bin/mail -s "$SUBJECT" "$EMAIL" < $EMAILMESSAGE
+
+# Set up the variables
+### The URI of the S3 bucket.
+S3URI="<%= @s3_bucket_uri %>"
+
+### An array of directories you want to backup (I included a few configuration directories to).
+DirsToBackup=()
+
+### The databases you want to backup
+DBsToBackup=(
+"<%= @database %>"
+)
+
+### The directory we're going to stor our backups in on this server.
+TmpBackupDir='/tmp'
+
+
+## The MySQL details
+MySQLDetails[0]='localhost' # MySQL Host
+MySQLDetails[1]='<%= @database_user %>' # User
+MySQLDetails[2]='<%= @database_password %>' # Password
+
+
+## The expiry dates of the backups
+### Only store 0 days of backups on the server.
+### Changed to 0 days to not fill the server with unneccessary backups
+Expiry[0]=`date --date="today" +%y-%m-%d`
+
+### Only store 2 weeks worth of backups on S3 
+Expiry[1]=`date --date="2 weeks ago" +%y-%m-%d`
+
+### Using ExpiryDayOfMonth to skip first day of the month when deleting so monthly backups are kept on s3
+ExpiryDayOfMonth=`date --date="2 weeks ago" +%d`
+
+### Todays date.
+TodayDate=`date --date="today" +%y-%m-%d`
+
+## Finally, setup the today specific variables.
+Today_TmpBackupDir=$TmpBackupDir'/'$TodayDate
+
+
+# Start backing up things.
+
+## Check we can write to the backups directory
+if [ -w "$TmpBackupDir" ]
+then
+  # Do nothing and move along.
+    echo 'Found and is writable:  '$TmpBackupDir
+else
+    echo "Can't write to: "$TmpBackupDir
+    exit
+fi
+
+## Make the backup directory (Also make it writable)
+echo ''
+echo 'Making Directory: '$Today_TmpBackupDir
+mkdir $Today_TmpBackupDir
+chmod 0777 $Today_TmpBackupDir
+
+## GZip the directories and put them into the backups folder
+echo ''
+for i in "${DirsToBackup[@]}"
+do
+    filename='dir-'`echo $i | tr '/' '_'`'.tar.gz'
+    echo 'Backing up '$i' to '$Today_TmpBackupDir'/'$filename
+    tar -czpPf $Today_TmpBackupDir'/'$filename $i
+done
+
+## Backup the MySQL databases
+echo ''
+for i in "${DBsToBackup[@]}"
+do
+    filename='mysql-'$i'.sql'
+    echo 'Dumping DB '$i' to '$Today_TmpBackupDir'/'$filename
+    #mysqldump -h "${MySQLDetails[0]}" -u "${MySQLDetails[1]}" -p"${MySQLDetails[2]}" $i > $Today_TmpBackupDir'/'$filename
+	mysqldump -h "${MySQLDetails[0]}" -u "${MySQLDetails[1]}" -p"${MySQLDetails[2]}" --single-transaction --quick --lock-tables=false  $i > $Today_TmpBackupDir'/'$filename
+    tar -czpPf $Today_TmpBackupDir'/'$filename'.tar.gz' $Today_TmpBackupDir'/'$filename
+    rm -R $Today_TmpBackupDir'/'$filename
+done
+
+## Alert admin that backup complete, starting sync
+SUBJECT="[servername] Backup Complete, Starting Sync! - "$EMAILDATE
+EMAILMESSAGE="/tmp/emailmessage2.txt"
+echo "Just to let you know that the backup script has finished and we're starting sync to s3 now."> $EMAILMESSAGE
+/bin/mail -s "$SUBJECT" "$EMAIL" < $EMAILMESSAGE
+
+## Sending new files to S3
+echo ''
+echo 'Syncing '$Today_TmpBackupDir' to '$S3URI$TodayDate'/'
+aws s3 cp --recursive $Today_TmpBackupDir $S3URI${TodayDate}
+if [ $? -ne 0 ]; then
+    SUBJECT="s3cmd put failed on [servername]"
+    EMAILMESSAGE="/tmp/emailmessage3.txt"
+        echo "Just to let you know that the s3cmd put of '$Today_TmpBackupDir' failed."> $EMAILMESSAGE
+        echo "You should check things out immediately." >>$EMAILMESSAGE
+    /bin/mail -s "$SUBJECT" "$EMAIL" < $EMAILMESSAGE
+fi
+
+# Cleanup.
+echo ''
+echo 'Removing local expired backup: '$TmpBackupDir'/'${Expiry[0]}
+rm -R $TmpBackupDir'/'${Expiry[0]}
+
+if [ "$ExpiryDayOfMonth" != '01' ]; then
+    echo 'Removing remote expired backup: '$S3URI${Expiry[1]}'/'
+    aws s3 rm $S3URI${Expiry[1]}'/' --recursive
+else
+    echo 'No need to remove backup on the 1st'
+fi
+
+echo 'Making '$Today_TmpBackupDir' permissions 0755'
+chmod 0755 $Today_TmpBackupDir
+
+echo 'All Done! Yay! (",)'
+
+## Notify admin that the script has finished
+SUBJECT="[servername] S3 Sync Complete! - "$EMAILDATE
+EMAILMESSAGE="/tmp/emailmessage4.txt"
+echo "Just to let you know that the s3 sync has now completed."> $EMAILMESSAGE
+/bin/mail -s "$SUBJECT" "$EMAIL" < $EMAILMESSAGE
+
+
+## Email Report of What Exists on S3 in Today's Folder
+exec 1>'/tmp/s3report.txt'
+aws s3 ls $S3URI$TodayDate/
+
+SUBJECT="S3 Backup Report of [servername]: "$TodayDate
+EMAILMESSAGE="/tmp/s3report.txt"
+/bin/mail -s "$SUBJECT" "$EMAIL" < $EMAILMESSAGE
