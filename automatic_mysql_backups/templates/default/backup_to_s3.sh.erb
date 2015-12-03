@@ -22,7 +22,7 @@ DBsToBackup=(
 )
 
 ### The directory we're going to stor our backups in on this server.
-TmpBackupDir='/tmp'
+TmpBackupDir='/vol/mysql'
 
 
 ## The MySQL details
@@ -36,7 +36,7 @@ MySQLDetails[2]='<%= @database_password %>' # Password
 ### Changed to 0 days to not fill the server with unneccessary backups
 Expiry[0]=`date --date="today" +%y-%m-%d`
 
-### Only store 2 weeks worth of backups on S3 
+### Only store 2 weeks worth of backups on S3
 Expiry[1]=`date --date="2 weeks ago" +%y-%m-%d`
 
 ### Using ExpiryDayOfMonth to skip first day of the month when deleting so monthly backups are kept on s3
